@@ -1,53 +1,69 @@
 #! /bin/bash
 
-KUBERNETES_VERSION="v1.22.0"
-
 ###############################################################################
 log()
 {
-   echo ***********************************************************************
+   echo "********************************************************************************"
    echo [`date`] - $1
+   echo "********************************************************************************"
 }
 
 ###############################################################################
 systemUpdate()
 {
-   log "System pkgs updating."
+   log "Updating System pkgs"
    sudo mkdir /etc/yum.repos.d/EPEL-SAVE
    sudo mv /etc/yum.repos.d/epel* /etc/yum.repos.d/EPEL-SAVE
    sudo yum update -y
    sudo yum install -y yum-utils net-tools curl
+   sudo yum install -y iproute-tc
+}
+
+###############################################################################
+systemSettings()
+{
+   log "Setup sshd"
    sudo cat /vagrant/config/hosts >> /etc/hosts
    sudo systemctl stop sshd
    sudo sed -i 's|#  PasswordAuthentication|PasswordAutentication|g' /etc/ssh/ssh_config
    sudo sed -i 's|#  IdentityFile|IdentityFile|g' /etc/ssh/ssh_config
    sudo sed -i 's|#  Port|Port|g' /etc/ssh/ssh_config
    sudo systemctl start sshd
-}
 
-###############################################################################
-systemSettings()
-{
-   log "Disabling swap permanently."
+   log "Disabling swap permanently"
    sudo swapoff -a
    sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
    sudo free -h
 
-   log "Enable transparent masquerading."
-   modprobe br_netfilter
-   firewall-cmd --add-masquerade --permanent
-   firewall-cmd --reload
-   
-   log "Set bridged packets to traverse iptables rules"
-   cat <<EOF sudo tee | /etc/sysctl.d/k8s.conf
-net.bridge.bridge-nf-call-ip6tables = 1
-net.bridge.bridge-nf-call-iptables = 1
-EOF
-   sysctl --system
-
    log "Disable SELINUX permanently."
+   # Disable Selinux, as this is required to allow containers to access the
+   # host filesystem, which is needed by pod networks and other services.
    sudo setenforce 0
    sudo sed -i --follow-symlinks 's/SELINUX=enforcing/SELINUX=disabled/g' /etc/sysconfig/selinux
+
+   log "Configure the firewall rules on the ports"
+   # Required ports on Masters
+   sudo firewall-cmd --permanent --add-port=6443/tcp
+   sudo firewall-cmd --permanent --add-port=2379-2380/tcp
+   sudo firewall-cmd --permanent --add-port=10250-10252/tcp
+
+   # Required ports on Workers
+   sudo firewall-cmd --permanent --add-port=30000-32767/tcp
+
+   # Required ports for Flannel CNI
+   sudo firewall-cmd --permanent --add-port=8285/udp
+   sudo firewall-cmd --permanent --add-port=8472/udp
+
+   sudo firewall-cmd --add-masquerade --permanent
+   sudo firewall-cmd --reload
+   sudo firewall-cmd --list-ports
+
+   sudo tee /etc/modules-load.d/k8s.conf<<EOF
+br_netfilter
+EOF
+
+ sudo modprobe br_netfilter
+ sudo lsmod | grep br_netfilter
 }
 
 ###############################################################################
@@ -74,7 +90,7 @@ installDocker()
 
   log "Apply recomanded kubernetes configuration"
   sudo mkdir /etc/docker
-  cat <<EOF | sudo tee /etc/docker/daemon.json
+  sudo tee /etc/docker/daemon.json<<EOF
 {
     "exec-opts": ["native.cgroupdriver=systemd"],
     "log-driver": "json-file",
@@ -96,15 +112,34 @@ EOF
 }
 
 ###############################################################################
-installAnsible()
+installKubernetes()
 {
-   sudo yum -y install centos-release-ansible-29.noarch
-   sudo yum -y install ansible
+  log "Add Kubernetes repository"
+sudo tee /etc/yum.repos.d/kubernetes.repo<<EOF
+[kubernetes]
+name=Kubernetes
+baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+EOF
+
+  log "Add some settings to sysctl"
+sudo tee /etc/sysctl.d/k8s.conf<<EOF
+net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+net.ipv4.ip_forward = 1
+EOF
+
+  log "Install Kubernetes"
+  sudo dnf install kubeadm kubectl -y
+  sudo systemctl enable kubelet
+  sudo systemctl start kubelet
 }
 
 ###############################################################################
-
 systemUpdate
 systemSettings
 installDocker
-installAnsible
+installKubernetes

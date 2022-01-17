@@ -1,6 +1,3 @@
-192.168.6.120     deploykub
-192.168.6.121     node01
-192.168.6.122     node02
-192.168.6.123     node03
-192.168.6.124     node04
-192.168.6.125     node05
+192.168.56.10  k-master.singleton.net k-master
+192.168.56.11  k-node1.singleton.net k-node1
+192.168.56.12  k-node2.singleton.net k-node2
